@@ -1,17 +1,13 @@
 FROM ubuntu:20.04
-
-# The root path under which contains all the dependencies to build this Dockerfile.
+# Dockerfile 中的根路径变量，包含所有所需的依赖。
 ARG DOCKER_BUILD_ROOT=.
-
 ENV LANG en_US.utf8
 WORKDIR /greptimedb
-
-# Add PPA for Python 3.10.
+# 添加 PPA 以安装 Python 3.10。
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common && \
     add-apt-repository ppa:deadsnakes/ppa -y
-
-# Install dependencies.
+# 安装依赖项。
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     libssl-dev \
     tzdata \
@@ -22,12 +18,11 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     build-essential \
     pkg-config \
     python3.10 \
-    python3.10-dev
-
+    python3.10-dev && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 ARG TARGETPLATFORM
 RUN echo "target platform: $TARGETPLATFORM"
-
-# Install protobuf, because the one in the apt is too old (v3.12).
+# 安装 protobuf，因 apt 中的版本过旧（v3.12）。
 RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
     curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-aarch_64.zip && \
     unzip protoc-29.1-linux-aarch_64.zip -d protoc3; \
@@ -35,54 +30,39 @@ elif [ "$TARGETPLATFORM" = "linux/amd64" ]; then \
     curl -OL https://github.com/protocolbuffers/protobuf/releases/download/v29.1/protoc-29.1-linux-x86_64.zip && \
     unzip protoc-29.1-linux-x86_64.zip -d protoc3; \
 fi
-RUN mv protoc3/bin/* /usr/local/bin/
-RUN mv protoc3/include/* /usr/local/include/
-
-# https://github.com/GreptimeTeam/greptimedb/actions/runs/10935485852/job/30357457188#step:3:7106
-# `aws-lc-sys` require gcc >= 10.3.0 to work, hence alias to use gcc-10
-RUN apt-get remove -y gcc-9 g++-9 cpp-9 && \
+RUN mv protoc3/bin/* /usr/local/bin/ && \
+    mv protoc3/include/* /usr/local/include/ && \
+    rm -rf protoc3*
+# 安装 GCC 10。
+RUN apt-get update && \
+    apt-get remove -y gcc-9 g++-9 cpp-9 && \
     apt-get install -y gcc-10 g++-10 cpp-10 make cmake && \
-    ln -sf /usr/bin/gcc-10 /usr/bin/gcc && ln -sf /usr/bin/g++-10 /usr/bin/g++ && \
+    ln -sf /usr/bin/gcc-10 /usr/bin/gcc && \
+    ln -sf /usr/bin/g++-10 /usr/bin/g++ && \
     ln -sf /usr/bin/gcc-10 /usr/bin/cc && \
-    ln -sf /usr/bin/g++-10 /usr/bin/cpp && ln -sf /usr/bin/g++-10 /usr/bin/c++ && \
-    cc --version && gcc --version && g++ --version && cpp --version && c++ --version
-
-# Remove Python 3.8 and install pip.
+    ln -sf /usr/bin/g++-10 /usr/bin/cpp && \
+    ln -sf /usr/bin/g++-10 /usr/bin/c++ && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+# 确保 Python 3.10 为默认版本并安装 pip。
 RUN apt-get -y purge python3.8 && \
     apt-get -y autoremove && \
     ln -s /usr/bin/python3.10 /usr/bin/python3 && \
     curl -sS https://bootstrap.pypa.io/get-pip.py | python3.10
-
-# Silence all `safe.directory` warnings, to avoid the "detect dubious repository" error when building with submodules.
-# Disabling the safe directory check here won't pose extra security issues, because in our usage for this dev build
-# image, we use it solely on our own environment (that github action's VM, or ECS created dynamically by ourselves),
-# and the repositories are pulled from trusted sources (still us, of course). Doing so does not violate the intention
-# of the Git's addition to the "safe.directory" at the first place (see the commit message here:
-# https://github.com/git/git/commit/8959555cee7ec045958f9b6dd62e541affb7e7d9).
-# There's also another solution to this, that we add the desired submodules to the safe directory, instead of using 
-# wildcard here. However, that requires the git's config files and the submodules all owned by the very same user.
-# It's troublesome to do this since the dev build runs in Docker, which is under user "root"; while outside the Docker,
-# it can be a different user that have prepared the submodules.
+# 配置 git 的安全目录。
 RUN git config --global --add safe.directory '*'
-
-# Install Python dependencies.
+# 复制并安装 Python 依赖项。
 COPY $DOCKER_BUILD_ROOT/docker/python/requirements.txt /etc/greptime/requirements.txt
-RUN python3 -m pip install -r /etc/greptime/requirements.txt
-
-# Install Rust.
-SHELL ["/bin/bash", "-c"]
+RUN python3 -m pip install --no-cache-dir -r /etc/greptime/requirements.txt
+# 安装 Rust 并设置环境。
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --no-modify-path --default-toolchain none -y
-ENV PATH /root/.cargo/bin/:$PATH
-
-# Install Rust toolchains.
-ARG RUST_TOOLCHAIN
-RUN rustup toolchain install ${RUST_TOOLCHAIN}
-
-# Install cargo-binstall with a specific version to adapt the current rust toolchain.
-# Note: if we use the latest version, we may encounter the following `use of unstable library feature 'io_error_downcast'` error.
-# compile from source take too long, so we use the precompiled binary instead
+# 设置 Rust 的 PATH。
+ENV PATH="/root/.cargo/bin:${PATH}"
+# 安装指定的 Rust nightly 工具链。
+ARG RUST_TOOLCHAIN=nightly-2024-10-19
+RUN rustup toolchain install ${RUST_TOOLCHAIN} --target=x86_64-unknown-linux-gnu && \
+    rustup component add rust-src --toolchain ${RUST_TOOLCHAIN}
+# 复制脚本并运行。
 COPY $DOCKER_BUILD_ROOT/docker/dev-builder/binstall/pull_binstall.sh /usr/local/bin/pull_binstall.sh
 RUN chmod +x /usr/local/bin/pull_binstall.sh && /usr/local/bin/pull_binstall.sh
-
-# Install nextest.
-RUN cargo binstall cargo-nextest --no-confirm
+# 安装 nextest。
+RUN cargo +${RUST_TOOLCHAIN} binstall cargo-nextest --no-confirm
